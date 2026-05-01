@@ -1,0 +1,79 @@
+name: Build Actor OS for Real Hardware
+
+on:
+  workflow_dispatch:
+
+env:
+  REPO_URL: https://github.com/reactos/reactos.git
+  STABLE_COMMIT: 87d6f1b          # use a known stable master commit; adjust as needed
+  # Patches to apply (these fix real‑hardware issues)
+  PATCH_URLS: >
+    https://gist.githubusercontent.com/example/fix_ahci.patch;
+    https://gist.githubusercontent.com/example/fix_usb_hub.patch
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build \
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+            mingw-w64-tools bison flex libpcap-dev \
+            libssl-dev libncurses-dev libtool zlib1g-dev \
+            pkg-config gettext unzip wget git
+
+      - name: Clone Actor OS (ReactOS) source
+        run: |
+          git clone --depth 1 $REPO_URL actor-os
+          cd actor-os
+          git fetch --depth 1 origin $STABLE_COMMIT
+          git checkout FETCH_HEAD
+
+      - name: Apply stability patches
+        working-directory: actor-os
+        run: |
+          IFS=';' read -ra URLS <<< "$PATCH_URLS"
+          for url in "${URLS[@]}"; do
+            echo "Applying patch from $url"
+            curl -sSL "$url" | git apply --verbose
+          done
+
+      - name: Configure build with real‑hardware drivers
+        working-directory: actor-os
+        run: |
+          mkdir -p build && cd build
+          cmake -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=../toolchain-mingw64.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DREACTOS_BUILD_ENVIRONMENT=MinGW64 \
+            -DENABLE_DRIVER_AHCI=ON \
+            -DENABLE_DRIVER_USBOHCI=ON \
+            -DENABLE_DRIVER_USBEHCI=ON \
+            -DENABLE_DRIVER_USBHUB=ON \
+            -DENABLE_DRIVER_USBSTOR=ON \
+            -DENABLE_DRIVER_HIDUSB=ON \
+            -DENABLE_DRIVER_ACPI=ON \
+            -DENABLE_NETWORK=ON \
+            -DENABLE_AUDIO=ON \
+            ..
+
+          # Alternative: you can edit the boot/bootdata/hivesys.inf to enable drivers
+          # We'll do a quick sed to force some critical drivers to load at boot
+          sed -i '/\[Services\\pci\]/,/^\[/ s/Start.*/Start = 0/' ../boot/bootdata/hivesys.inf
+          sed -i '/\[Services\\atapi\]/,/^\[/ s/Start.*/Start = 0/' ../boot/bootdata/hivesys.inf
+          sed -i '/\[Services\\acpi\]/,/^\[/ s/Start.*/Start = 0/' ../boot/bootdata/hivesys.inf
+
+      - name: Build hybrid ISO (boot + live)
+        working-directory: actor-os/build
+        run: ninja hybridcd -j$(nproc)
+
+      - name: Upload Actin OS ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: ActorOS-RealHW
+          path: actor-os/build/hybridcd.iso
+          retention-days: 30
